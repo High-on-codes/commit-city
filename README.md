@@ -30,9 +30,10 @@ publishes `city.svg` (README image), `city.json` (data), `badge.svg` and `index.
 
 In your profile repo (`<you>/<you>`), copy [`templates/profile-city.yml`](templates/profile-city.yml)
 and enable Pages the same way. Each day it lists your public repos with the workflow's own
-`GITHUB_TOKEN`, collects every `city.json` they publish, and merges them, one district per repo,
-oldest first. The generator stays in one place and the API is called once per run, so there are no
-rate-limit problems.
+`GITHUB_TOKEN` and turns every one into a district, oldest first. New repos join on the next run
+with no setup. A repo that publishes its own `city.json` (the per-repo action above) is used as
+published, so its `.commitcity` settings apply; every other repo is cloned and generated in the
+profile run. Repos over 2 GB are skipped; give those the per-repo action instead.
 
 **Private repos are opt-in and shape only.** Set `shape-only: "true"` in that repo's workflow: its
 `city.json` then carries geometry and timing, never commit messages, authors, SHAs, folder names or

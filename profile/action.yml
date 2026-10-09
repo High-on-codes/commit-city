@@ -1,5 +1,5 @@
 name: Commit City (personal city)
-description: Collects every repo's published city.json and merges them, one district per repo, into one personal city.
+description: Turns every public repo you own into a district, one per repo, and merges them into one personal city.
 author: Commit City
 branding:
   icon: grid

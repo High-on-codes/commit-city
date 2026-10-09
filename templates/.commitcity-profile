@@ -1,4 +1,4 @@
-# Optional, in your profile repo. Public repos with Pages are found automatically.
+# Optional, in your profile repo. Every public repo you own is included automatically.
 # Private repos are opt-in: give them `shape-only: "true"` in their own workflow, then list them here.
 # include: https://you.github.io/private-thing/city.json
 # exclude: some-repo-you-would-rather-not-show
