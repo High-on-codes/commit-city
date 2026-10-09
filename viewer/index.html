@@ -1,0 +1,650 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Commit City</title>
+<style>
+  :root {
+    --bg: #111111; --ink: #ECE8DD; --accent: #E9D58B;
+    --ink-2: color-mix(in srgb, var(--ink) 62%, transparent);
+    --ink-3: color-mix(in srgb, var(--ink) 36%, transparent);
+    --rule: color-mix(in srgb, var(--ink) 18%, transparent);
+    --panel: color-mix(in srgb, var(--bg) 88%, transparent);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font: 12px/1.45 var(--mono); overflow: hidden; }
+  canvas { position: fixed; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; }
+  canvas.dragging { cursor: grabbing; }
+  .title { position: fixed; left: clamp(16px, 3vw, 32px); top: clamp(16px, 3vw, 32px); pointer-events: none; }
+  .eyebrow { color: var(--accent); font-size: 9px; letter-spacing: .26em; }
+  .name { font-size: clamp(15px, 2.2vw, 20px); margin: 4px 0 6px; padding-bottom: 6px; border-bottom: 0.5px solid var(--rule); position: relative; max-width: 70vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .name::after { content: ""; position: absolute; left: 0; bottom: -0.5px; width: 18px; height: 1.2px; background: var(--accent); }
+  .stats { color: var(--ink-2); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; }
+  .bar { position: fixed; left: 50%; bottom: clamp(16px, 3vw, 28px); transform: translateX(-50%); width: min(720px, calc(100vw - 32px)); display: grid; grid-template-columns: auto 1fr auto; gap: 14px; align-items: center; padding: 10px 14px; background: var(--panel); border: 0.5px solid var(--rule); border-radius: 2px; }
+  button { font: inherit; color: var(--accent); background: none; border: 0.5px solid var(--rule); border-radius: 2px; padding: 4px 10px; letter-spacing: .12em; cursor: pointer; }
+  button:focus-visible, input:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .when { color: var(--ink-2); font-size: 10px; letter-spacing: .08em; min-width: 11ch; text-align: right; font-variant-numeric: tabular-nums; }
+  .tip { position: fixed; pointer-events: none; max-width: 320px; padding: 9px 11px; background: var(--panel); border: 0.5px solid var(--rule); border-left: 1.5px solid var(--accent); border-radius: 2px; opacity: 0; transition: opacity .12s; will-change: transform, opacity; }
+  .tip.on { opacity: 1; }
+  .tip .subject { color: var(--ink); margin-bottom: 4px; overflow-wrap: anywhere; }
+  .tip .meta { color: var(--ink-3); font-size: 10px; letter-spacing: .04em; }
+  .status { position: fixed; inset: 0; display: grid; place-items: center; color: var(--ink-3); letter-spacing: .2em; font-size: 10px; text-transform: uppercase; pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
+</style>
+</head>
+<body>
+<canvas id="city" aria-label="Commit City map"></canvas>
+<div class="title"><div class="eyebrow">COMMIT CITY</div><div class="name" id="name">—</div><div class="stats" id="stats"></div></div>
+<div class="tip" id="tip" role="status"><div class="subject" id="tip-subject"></div><div class="meta" id="tip-meta"></div></div>
+<div class="bar" id="bar" hidden>
+  <button id="play" type="button" aria-label="Replay history">PLAY</button>
+  <input id="scrub" type="range" min="0" max="0" value="0" step="1" aria-label="Point in history">
+  <div class="when" id="when"></div>
+</div>
+<div class="status" id="status">loading city.json</div>
+<script>
+"use strict";
+// ---------------------------------------------------------------------------------------------
+// <geometry> — line-for-line port of Sources/CityKit/Blueprint.swift + Decay.swift.
+// Kept in lockstep by Tests/viewer-parity.mjs, which diffs this block against `commitcity scene`.
+const FLOOR = 0.16, CELL = 0.16, MAX_REPAIRS = 6, COS30 = 0.8660254037844386, PITCH = 4, BLOCK = 3;
+const INK = { structure: 0, detail: 1, windowLit: 2, windowDark: 3, ground: 4, landmark: 5, accent: 6, road: 7 };
+const V = (x, y, z) => [x, y, z];
+
+function detailHash(seed, a, b) {
+  let h = (seed ^ 0x9E3779B9) >>> 0;
+  h = Math.imul(h ^ (a >>> 0), 0x85EBCA6B) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 0xC2B2AE35) >>> 0;
+  h = Math.imul(h ^ (b >>> 0), 0x27D4EB2F) >>> 0;
+  h = (h ^ (h >>> 15)) >>> 0;
+  h = Math.imul(h, 0x165667B1) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
+}
+const detailUnit = (seed, a, b) => detailHash(seed, a, b) / 4294967296;
+
+function box(out, x0, x1, y0, y1, z0, z1, ink) {
+  out.push({ k: "o", p: [V(x0, y0, z1), V(x1, y0, z1), V(x1, y0, z0), V(x1, y1, z0), V(x0, y1, z0), V(x0, y1, z1)] });
+  out.push({ k: "l", ink, c: true, p: [V(x0, y0, z1), V(x1, y0, z1), V(x1, y1, z1), V(x0, y1, z1)] });
+  out.push({ k: "l", ink, c: false, p: [V(x0, y1, z1), V(x0, y1, z0), V(x1, y1, z0), V(x1, y0, z0), V(x1, y0, z1)] });
+  out.push({ k: "l", ink, c: false, p: [V(x1, y1, z0), V(x1, y1, z1)] });
+}
+const cells = (len) => Math.max(1, Math.trunc(len / CELL));
+const line = (out, ink, ...p) => out.push({ k: "l", ink, c: false, p });
+
+function windowGrid(out, b, east, at, a0, a1, z0, floors, columns, faceID) {
+  if (!(floors > 0 && columns > 0 && a1 > a0)) return;
+  const cell = (a1 - a0) / columns;
+  for (let f = 0; f < floors; f++) {
+    const z = z0 + (f + 0.45) * FLOOR;
+    for (let c = 0; c < columns; c++) {
+      const s = a0 + cell * (c + 0.28), e = a0 + cell * (c + 0.72);
+      const ink = detailUnit(b.seed, faceID * 4096 + f, c) < b.litWindows ? INK.windowLit : INK.windowDark;
+      if (east) line(out, ink, V(at, s, z), V(at, e, z)); else line(out, ink, V(s, at, z), V(e, at, z));
+    }
+  }
+}
+
+function buildingTop(b) {
+  const h = b.floors * FLOOR;
+  return b.style === "gabled" ? h + b.depth * 0.35 : b.style === "factory" ? h + 0.14 : h;
+}
+
+function primitives(b, off, time, full, isNewest) {
+  const out = [];
+  const cx = b.lot.x + off.x + 0.5, cy = b.lot.y + off.y + 0.5;
+  const x0 = cx - b.width / 2, x1 = cx + b.width / 2, y0 = cy - b.depth / 2, y1 = cy + b.depth / 2;
+  const h = b.floors * FLOOR;
+  const S = isNewest ? INK.accent : b.isLandmark ? INK.landmark : INK.structure;
+  switch (b.style) {
+    case "park": {
+      out.push({ k: "l", ink: INK.ground, c: true, p: [V(x0, y0, 0), V(x1, y0, 0), V(x1, y1, 0), V(x0, y1, 0)] });
+      const trees = [];
+      b.trees.forEach((t, i) => {
+        if (t > time) return;
+        const u = 0.18 + 0.64 * detailUnit(b.seed, 7, i), v = 0.18 + 0.64 * detailUnit(b.seed, 8, i);
+        trees.push({ x: x0 + u * b.width, y: y0 + v * b.depth, i });
+      });
+      trees.sort((a, c) => (a.x + a.y) - (c.x + c.y) || a.i - c.i);
+      for (const t of trees) {
+        line(out, S, V(t.x, t.y, 0), V(t.x, t.y, 0.16));
+        out.push({ k: "d", ink: S, r: 0.09, p: [V(t.x, t.y, 0.25)] });
+      }
+      return out;
+    }
+    case "glassTower": {
+      box(out, x0, x1, y0, y1, 0, h, S);
+      const nx = Math.max(2, Math.trunc(b.width / 0.14)), ny = Math.max(2, Math.trunc(b.depth / 0.14));
+      if (full) {
+        for (let k = 1; k < ny; k++) { const y = y0 + b.depth * k / ny; line(out, INK.detail, V(x1, y, 0), V(x1, y, h)); }
+        for (let k = 1; k < nx; k++) { const x = x0 + b.width * k / nx; line(out, INK.detail, V(x, y1, 0), V(x, y1, h)); }
+        windowGrid(out, b, true, x1, y0, y1, 0, b.floors, ny, 0);
+        windowGrid(out, b, false, y1, x0, x1, 0, b.floors, nx, 1);
+      }
+      if (b.floors >= 14 && !b.isLandmark) line(out, INK.detail, V(cx, cy, h), V(cx, cy, h + 0.35));
+      break;
+    }
+    case "lowBlock": {
+      box(out, x0, x1, y0, y1, 0, h, S);
+      if (full) {
+        for (let f = 1; f < Math.max(1, b.floors); f++) { const z = f * FLOOR; line(out, INK.detail, V(x1, y0, z), V(x1, y1, z), V(x0, y1, z)); }
+        windowGrid(out, b, true, x1, y0, y1, 0, b.floors, cells(b.depth), 0);
+        windowGrid(out, b, false, y1, x0, x1, 0, b.floors, cells(b.width), 1);
+      }
+      break;
+    }
+    case "factory": {
+      box(out, x0, x1, y0, y1, 0, h, S);
+      if (full) {
+        windowGrid(out, b, false, y1, x0, x1, 0, b.floors, cells(b.width), 1);
+        windowGrid(out, b, true, x1, y0, y1, 0, b.floors, cells(b.depth), 0);
+      }
+      const ch = Math.min(0.12, b.width * 0.22);
+      box(out, x0 + 0.05, x0 + 0.05 + ch, y0 + 0.05, y0 + 0.05 + ch, h, h + 0.42 + 0.02 * b.floors, S);
+      const n = Math.max(2, Math.trunc(b.width / 0.2)), tw = b.width / n, th = 0.14;
+      for (let k = 0; k < n; k++) {
+        const xa = x0 + tw * k, xb = xa + tw, top = h + th;
+        out.push({ k: "o", p: [V(xa, y0, h), V(xb, y0, top), V(xb, y1, top), V(xa, y1, h)] });
+        out.push({ k: "o", p: [V(xb, y0, h), V(xb, y0, top), V(xb, y1, top), V(xb, y1, h)] });
+        out.push({ k: "l", ink: S, c: true, p: [V(xa, y0, h), V(xb, y0, top), V(xb, y1, top), V(xa, y1, h)] });
+        line(out, S, V(xb, y0, top), V(xb, y0, h), V(xb, y1, h), V(xb, y1, top));
+      }
+      break;
+    }
+    case "steppedTower": {
+      let tiers;
+      if (b.floors >= 6) {
+        const first = Math.trunc((b.floors + 1) / 2), second = Math.max(1, Math.trunc((b.floors * 3 + 9) / 10));
+        tiers = [first, second, Math.max(1, b.floors - first - second)];
+      } else tiers = [b.floors];
+      const inset = Math.min(b.width, b.depth) * 0.14;
+      let base = 0;
+      tiers.forEach((tf, t) => {
+        const s = inset * t, top = base + tf * FLOOR;
+        const tx0 = x0 + s, tx1 = x1 - s, ty0 = y0 + s, ty1 = y1 - s;
+        box(out, tx0, tx1, ty0, ty1, base, top, S);
+        if (full) {
+          windowGrid(out, b, true, tx1, ty0, ty1, base, tf, cells(ty1 - ty0), t * 2);
+          windowGrid(out, b, false, ty1, tx0, tx1, base, tf, cells(tx1 - tx0), t * 2 + 1);
+        }
+        base = top;
+      });
+      break;
+    }
+    case "slab": {
+      box(out, x0, x1, y0, y1, 0, h, S);
+      if (full) {
+        windowGrid(out, b, true, x1, y0, y1, 0, b.floors, cells(b.depth), 0);
+        windowGrid(out, b, false, y1, x0, x1, 0, b.floors, cells(b.width), 1);
+      }
+      if (b.floors >= 10) {
+        const mw = b.width * 0.35, md = b.depth * 0.35;
+        box(out, cx - mw / 2, cx + mw / 2, cy - md / 2, cy + md / 2, h, h + 0.12, INK.detail);
+      }
+      break;
+    }
+    case "gabled": {
+      box(out, x0, x1, y0, y1, 0, h, S);
+      if (full) {
+        windowGrid(out, b, true, x1, y0, y1, 0, b.floors, cells(b.depth), 0);
+        windowGrid(out, b, false, y1, x0, x1, 0, b.floors, cells(b.width), 1);
+      }
+      const ym = (y0 + y1) / 2, r = h + b.depth * 0.35;
+      out.push({ k: "o", p: [V(x0, y0, h), V(x1, y0, h), V(x1, ym, r), V(x0, ym, r)] });
+      out.push({ k: "o", p: [V(x0, ym, r), V(x1, ym, r), V(x1, y1, h), V(x0, y1, h)] });
+      out.push({ k: "o", p: [V(x1, y0, h), V(x1, ym, r), V(x1, y1, h)] });
+      line(out, S, V(x0, y1, h), V(x0, ym, r), V(x0, y0, h), V(x1, y0, h));
+      line(out, S, V(x0, ym, r), V(x1, ym, r));
+      line(out, S, V(x1, y0, h), V(x1, ym, r), V(x1, y1, h), V(x0, y1, h));
+      break;
+    }
+  }
+  const repairs = Math.min(MAX_REPAIRS, b.repairs.reduce((n, t) => n + (t <= time ? 1 : 0), 0));
+  if (repairs > 0) {
+    const bay = Math.min(0.12, b.width / MAX_REPAIRS), top = Math.min(h, 0.34);
+    for (let k = 0; k < repairs; k++) {
+      const xa = x0 + b.width * (k + 0.5) / MAX_REPAIRS - bay / 2, xb = xa + bay;
+      line(out, INK.detail, V(xa, y1, 0), V(xa, y1, top), V(xb, y1, top), V(xb, y1, 0));
+      line(out, INK.detail, V(xa, y1, 0), V(xb, y1, top));
+      line(out, INK.detail, V(xb, y1, 0), V(xa, y1, top));
+    }
+  }
+  if (b.isLandmark) {
+    const top = buildingTop(b);
+    line(out, INK.landmark, V(cx, cy, top), V(cx, cy, top + 1.2));
+    out.push({ k: "d", ink: INK.accent, r: 0.05, p: [V(cx, cy, top + 1.2)] });
+  }
+  return out;
+}
+
+function finishedBeacon(b, off) {
+  const cx = b.lot.x + off.x + 0.5, cy = b.lot.y + off.y + 0.5;
+  const top = buildingTop(b) + (b.isLandmark ? 1.2 : 0);
+  return [
+    { k: "l", ink: INK.accent, c: false, p: [V(cx, cy, top), V(cx, cy, top + 0.6)] },
+    { k: "d", ink: INK.accent, r: 0.16, p: [V(cx, cy, top + 0.6)] },
+    { k: "d", ink: INK.accent, r: 0.07, p: [V(cx, cy, top + 0.6)] },
+  ];
+}
+
+function massingPrimitives(at, off, tops, lit) {
+  if (!tops.length) return [];
+  const sorted = tops.slice().sort((a, b) => a - b), h = sorted[Math.trunc(sorted.length * 3 / 4)];
+  const ox = at.x * PITCH + off.x, oy = at.y * PITCH + off.y;
+  const x0 = ox + 0.15, x1 = ox + BLOCK - 0.15, y0 = oy + 0.15, y1 = oy + BLOCK - 0.15;
+  const out = [];
+  box(out, x0, x1, y0, y1, 0, h, INK.structure);
+  const seed = detailHash(0x5EED, at.x, at.y), rows = Math.trunc(h / (3 * FLOOR));
+  for (let r = 0; r < rows; r++) {
+    const z = (r * 3 + 1.5) * FLOOR;
+    for (let c = 0; c < 4; c++) {
+      const s = c * 0.66 + 0.3;
+      if (detailUnit(seed, r, c) < lit) line(out, INK.windowLit, V(x1, y0 + s, z), V(x1, y0 + s + 0.3, z));
+      if (detailUnit(seed, 4096 + r, c) < lit) line(out, INK.windowLit, V(x0 + s, y1, z), V(x0 + s + 0.3, y1, z));
+    }
+  }
+  return out;
+}
+
+const floorDiv = (v, d) => (v >= 0 ? Math.trunc(v / d) : -Math.trunc((-v + d - 1) / d));
+
+function blockPrimitives(blk, off, east, south) {
+  const ox = blk.at.x * PITCH + off.x, oy = blk.at.y * PITCH + off.y, s = BLOCK, road = (PITCH + s) / 2;
+  const rect = (a, b, c, d) => ({ k: "l", ink: INK.ground, c: true, p: [V(a, b, 0), V(c, b, 0), V(c, d, 0), V(a, d, 0)] });
+  const out = [rect(ox - 0.15, oy - 0.15, ox + s + 0.15, oy + s + 0.15)];
+  if (blk.isPlaza) out.push(rect(ox + 0.1, oy + 0.1, ox + s - 0.1, oy + s - 0.1));
+  if (east) out.push({ k: "l", ink: INK.road, c: false, p: [V(ox + road, oy - 0.5, 0), V(ox + road, oy + s + 0.5, 0)] });
+  if (south) out.push({ k: "l", ink: INK.road, c: false, p: [V(ox - 0.5, oy + road, 0), V(ox + s + 0.5, oy + road, 0)] });
+  return out;
+}
+
+function decayState(lastActive, now, finished) {
+  if (finished) return { kind: "finished", p: 0 };
+  const days = Math.max(0, (now - lastActive) / 86400);
+  if (days < 30) return { kind: "active", p: 0 };
+  if (days < 90) return { kind: "idle", p: (days - 30) / 60 };
+  return { kind: "abandoned", p: Math.min(1, (days - 90) / 275) };
+}
+function resolveLook(d, nh, now) {
+  const finished = d.status === "finished";
+  const s = decayState(d.lastCommitAt, now, finished);
+  const structureAlpha = s.kind === "abandoned" ? 0.72 - 0.5 * s.p : 1;
+  let windowAlpha = s.kind === "idle" ? 1 - 0.85 * s.p : s.kind === "abandoned" ? 0.15 * (1 - s.p) : 1;
+  if (!finished && nh >= 0 && nh < d.neighborhoods.length) {
+    const a = decayState(d.neighborhoods[nh].lastActiveAt, now, false);
+    if (a.kind === "idle") windowAlpha = Math.min(windowAlpha, 1 - 0.6 * a.p);
+    if (a.kind === "abandoned") windowAlpha = Math.min(windowAlpha, 0.4);
+  }
+  return { structureAlpha, windowAlpha, dash: s.kind === "abandoned" ? [3, 1.5 + 2.5 * s.p] : null, state: s.kind };
+}
+
+const cmp = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1; return 0; };
+
+function buildScene(city, time, detail, memo) {
+  const full = detail === "full", massing = detail === "massing";
+  const ground = [], standing = [];
+  let newest = null;
+  city.districts.forEach((d, di) => {
+    for (const b of d.buildings) if (b.bornAt <= time && b.style !== "park") {
+      const c = [b.bornAt, di, b.id];
+      if (!newest || cmp(c, newest) > 0) newest = c;
+    }
+  });
+  let count = 0;
+  city.districts.forEach((d, di) => {
+    const gl = resolveLook(d, -1, time), claimed = new Set();
+    for (const blk of d.blocks) if (blk.claimedAt <= time) claimed.add(blk.at.x + "," + blk.at.y);
+    for (const blk of d.blocks) if (blk.claimedAt <= time) {
+      ground.push({ district: di, building: null, look: gl,
+        prims: blockPrimitives(blk, d.offset, claimed.has((blk.at.x + 1) + "," + blk.at.y), claimed.has(blk.at.x + "," + (blk.at.y + 1))) });
+    }
+    const visible = d.buildings.filter((b) => b.bornAt <= time);
+    count += visible.length;
+    let host = null;
+    if (d.status === "finished") {
+      for (const b of visible) if (b.style !== "park" && (host === null || cmp([buildingTop(b), -b.id], [buildingTop(host), -host.id]) > 0)) host = b;
+    }
+    const massed = new Map();
+    for (const b of visible) {
+      const isNewest = !!newest && newest[1] === di && newest[2] === b.id;
+      if (massing && !isNewest && !b.isLandmark && b !== host) {
+        if (b.style === "park") continue;
+        const bx = floorDiv(b.lot.x, PITCH), by = floorDiv(b.lot.y, PITCH), k = bx + "," + by;
+        let e = massed.get(k);
+        if (!e) massed.set(k, (e = { at: { x: bx, y: by }, tops: [], lit: 0, nh: b.neighborhood }));
+        e.tops.push(buildingTop(b)); e.lit += b.litWindows;
+        continue;
+      }
+      const rep = b.repairs.reduce((n, t) => n + (t <= time ? 1 : 0), 0), tr = b.trees.reduce((n, t) => n + (t <= time ? 1 : 0), 0);
+      const key = di + ":" + b.id + ":" + rep + ":" + tr + ":" + (isNewest ? 1 : 0) + ":" + (host === b ? 1 : 0) + ":" + detail;
+      let prims = memo && memo.get(key);
+      if (!prims) {
+        prims = primitives(b, d.offset, time, full, isNewest);
+        if (host === b) prims = prims.concat(finishedBeacon(b, d.offset));
+        if (memo) memo.set(key, prims);
+      }
+      const cx = b.lot.x + d.offset.x + 0.5, cy = b.lot.y + d.offset.y + 0.5;
+      standing.push({ key: [cx + cy, cx, di, b.id], item: { district: di, building: b, look: resolveLook(d, b.neighborhood, time), prims } });
+    }
+    for (const e of massed.values()) {
+      const cx = e.at.x * PITCH + d.offset.x + 1.5, cy = e.at.y * PITCH + d.offset.y + 1.5;
+      standing.push({ key: [cx + cy, cx, di, -1], item: { district: di, building: null, look: resolveLook(d, e.nh, time),
+        prims: massingPrimitives(e.at, d.offset, e.tops, e.lit / e.tops.length) } });
+    }
+  });
+  standing.sort((a, b) => cmp(a.key, b.key));
+  return { items: ground.concat(standing.map((s) => s.item)), buildingCount: count };
+}
+// </geometry>
+// ---------------------------------------------------------------------------------------------
+
+const THEMES = {
+  carbon: { bg: "#111111", ink: "#ECE8DD", accent: "#E9D58B" },
+  cyanotype: { bg: "#0E2238", ink: "#D8E4F0", accent: "#E9D58B" },
+  vellum: { bg: "#F1EDE3", ink: "#1D1D1B", accent: "#A8862A" },
+};
+// [useAccent, alpha, width, dash] per ink — mirrors Theme.stroke(_:).
+const STROKES = [[0, .8, .8], [0, .34, .55], [1, .95, 1], [0, .085, .9], [0, .16, .6], [0, .96, 1.35], [1, 1, 1.1], [0, .22, .6, [1.5, 3.5]]];
+
+const params = new URLSearchParams(location.search);
+const theme = THEMES[params.get("theme")] || THEMES.carbon;
+const src = params.get("src") || "city.json";
+const root = document.documentElement.style;
+root.setProperty("--bg", theme.bg); root.setProperty("--ink", theme.ink); root.setProperty("--accent", theme.accent);
+
+const $ = (id) => document.getElementById(id);
+const canvas = $("city"), ctx = canvas.getContext("2d", { alpha: false });
+const tip = $("tip"), scrub = $("scrub"), playButton = $("play");
+const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const fmtDate = (t) => new Date(t * 1000).toISOString().slice(0, 10);
+const fmtInt = (n) => n.toLocaleString("en-US");
+
+const state = {
+  city: null, times: [], timeIndex: 0, scene: null, memo: new Map(), proj: [],
+  view: { scale: 1, x: 0, y: 0 }, lod: "full", fitted: false, dirty: true, playing: false, playFrom: 0,
+  drops: new Map(), hover: null, gestureUntil: 0, cssW: 0, cssH: 0, dpr: 1, etag: null,
+};
+const now = () => (state.timeIndex >= state.times.length - 1 ? Math.max(state.city.generatedAt, Date.now() / 1000 | 0) : state.times[state.timeIndex]);
+
+function projectScene() {
+  // Unscaled projected coordinates per item, computed once per scene, reused every frame.
+  state.proj = state.scene.items.map((it) => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    const prims = it.prims.map((p) => {
+      const pts = new Float64Array(p.p.length * 2);
+      p.p.forEach((v, i) => {
+        const sx = (v[0] - v[1]) * COS30, sy = (v[0] + v[1]) * 0.5 - v[2];
+        pts[i * 2] = sx; pts[i * 2 + 1] = sy;
+        const r = p.k === "d" ? p.r : 0;
+        if (sx - r < minX) minX = sx - r; if (sx + r > maxX) maxX = sx + r;
+        if (sy - r < minY) minY = sy - r; if (sy + r > maxY) maxY = sy + r;
+      });
+      return { k: p.k, ink: p.ink, c: p.c, r: p.r, pts };
+    });
+    return { item: it, prims, minX, minY, maxX, maxY };
+  });
+}
+
+function rebuild(animateNew) {
+  const before = new Set(state.scene ? state.scene.items.filter((i) => i.building).map((i) => i.district + ":" + i.building.id) : []);
+  state.lod = desiredLod();
+  if (state.memo.size > 60000) state.memo.clear();
+  state.scene = buildScene(state.city, now(), state.lod, state.memo);
+  projectScene();
+  cache.valid = false;
+  if (animateNew && !reducedMotion && before.size) {
+    const t = performance.now();
+    let added = 0;
+    for (const it of state.scene.items) {
+      if (!it.building) continue;
+      const key = it.district + ":" + it.building.id;
+      if (!before.has(key) && added++ < 300) state.drops.set(key, t);
+    }
+  }
+  const t = now(), latest = state.timeIndex >= state.times.length - 1;
+  let total = 0;
+  for (const d of state.city.districts) {
+    if (latest) { total += d.commitCount; continue; }
+    for (const b of d.buildings) if (b.bornAt <= t) total += 1 + b.repairs.filter((r) => r <= t).length + Math.max(0, b.trees.filter((r) => r <= t).length - 1);
+  }
+  $("stats").textContent = `${fmtInt(total)} commits · ${fmtInt(state.scene.buildingCount)} buildings · ${state.city.districts.length > 1 ? state.city.districts.length + " districts" : resolveLook(state.city.districts[0], -1, now()).state}`;
+  $("when").textContent = state.times.length ? fmtDate(state.times[state.timeIndex]) : "";
+  state.dirty = true;
+}
+
+// Level of detail mirrors the SVG renderer's thresholds; huge cities switch from block massing
+// to individual buildings once a lot is big enough on screen to tell them apart.
+function desiredLod() {
+  const total = state.city.districts.reduce((n, d) => n + d.buildings.length, 0);
+  if (total > 12000) return state.view.scale < 7 ? "massing" : "reduced";
+  return total > 2500 ? "reduced" : "full";
+}
+
+function fit() {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const p of state.proj) { minX = Math.min(minX, p.minX); minY = Math.min(minY, p.minY); maxX = Math.max(maxX, p.maxX); maxY = Math.max(maxY, p.maxY); }
+  if (!isFinite(minX)) { minX = -5; minY = -5; maxX = 5; maxY = 5; }
+  const s = Math.min((state.cssW - 64) / (maxX - minX), (state.cssH - 200) / (maxY - minY), 40);
+  state.view.scale = Math.max(1, s);
+  state.view.x = state.cssW / 2 - (minX + maxX) / 2 * state.view.scale;
+  state.view.y = state.cssH / 2 + 10 - (minY + maxY) / 2 * state.view.scale;
+  state.fitted = true;
+}
+
+function resize() {
+  state.dpr = Math.min(window.devicePixelRatio || 1, 3);
+  state.cssW = window.innerWidth; state.cssH = window.innerHeight;
+  canvas.width = Math.round(state.cssW * state.dpr); canvas.height = Math.round(state.cssH * state.dpr);
+  cache.valid = false;
+  state.dirty = true;
+}
+
+function draw(t) {
+  const { scale, x: ox, y: oy } = state.view, W = state.cssW, H = state.cssH;
+  ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+  ctx.fillStyle = theme.bg; ctx.fillRect(0, 0, W, H);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  let animating = false;
+  const weight = Math.min(1, Math.max(0.4, scale / 10)); // mirrors SVGRenderer: hairlines stay hairlines when zoomed out
+  for (const p of state.proj) {
+    let dy = 0, fade = 1;
+    if (p.item.building) {
+      const key = p.item.district + ":" + p.item.building.id, start = state.drops.get(key);
+      if (start !== undefined) {
+        const k = Math.min(1, (t - start) / 520), e = 1 - Math.pow(1 - k, 3);
+        dy = -(1 - e) * 46; fade = e; animating = true;
+        if (k >= 1) state.drops.delete(key);
+      }
+    }
+    if (ox + p.maxX * scale < 0 || ox + p.minX * scale > W || oy + p.maxY * scale + dy < 0 || oy + p.minY * scale + dy > H) continue;
+    const look = p.item.look, hovered = state.hover === p;
+    for (const q of p.prims) {
+      const pts = q.pts;
+      ctx.beginPath();
+      if (q.k === "d") {
+        ctx.arc(ox + pts[0] * scale, oy + pts[1] * scale + dy, Math.max(0.6, q.r * scale), 0, Math.PI * 2);
+      } else {
+        for (let i = 0; i < pts.length; i += 2) {
+          const sx = ox + pts[i] * scale, sy = oy + pts[i + 1] * scale + dy;
+          if (i === 0) ctx.moveTo(sx, sy); else ctx.lineTo(sx, sy);
+        }
+        if (q.k === "o" || q.c) ctx.closePath();
+      }
+      if (q.k === "o" || q.k === "d") { ctx.globalAlpha = 1; ctx.fillStyle = theme.bg; ctx.fill(); if (q.k === "o") continue; }
+      const st = STROKES[hovered && q.ink !== INK.windowLit && q.ink !== INK.windowDark ? INK.accent : q.ink];
+      const mult = q.ink === INK.windowLit ? look.windowAlpha : look.structureAlpha;
+      ctx.strokeStyle = st[0] ? theme.accent : theme.ink;
+      ctx.globalAlpha = Math.max(0, st[1] * mult * fade);
+      ctx.lineWidth = st[2] * weight;
+      ctx.setLineDash((st[3] || (look.dash && q.ink !== INK.windowLit && q.ink !== INK.windowDark && q.ink !== INK.road ? look.dash : [])).map((v) => v * weight));
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1; ctx.setLineDash([]);
+  return animating;
+}
+
+// While the user drags or zooms, the last full render is re-projected as a bitmap (one blit per
+// frame, whatever the city size); the vector redraw happens once the gesture settles.
+const cache = { canvas: document.createElement("canvas"), valid: false, scale: 1, x: 0, y: 0 };
+function storeCache() {
+  cache.canvas.width = canvas.width; cache.canvas.height = canvas.height;
+  cache.canvas.getContext("2d").drawImage(canvas, 0, 0);
+  cache.valid = true; cache.scale = state.view.scale; cache.x = state.view.x; cache.y = state.view.y;
+}
+function blitCache() {
+  const k = state.view.scale / cache.scale, dpr = state.dpr;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = 1; ctx.fillStyle = theme.bg; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.setTransform(k, 0, 0, k, (state.view.x - cache.x * k) * dpr, (state.view.y - cache.y * k) * dpr);
+  ctx.drawImage(cache.canvas, 0, 0);
+}
+
+function frame(t) {
+  if (state.playing) {
+    const span = Math.max(1, state.times.length - 1), duration = Math.min(30000, 6000 + span * 40);
+    const target = Math.min(span, Math.floor(((t - state.playFrom) / duration) * span));
+    if (target !== state.timeIndex) { state.timeIndex = target; scrub.value = String(target); rebuild(true); }
+    if (target >= span) { state.playing = false; playButton.textContent = "PLAY"; }
+  }
+  if (state.city && (state.dirty || state.drops.size || state.playing)) {
+    if (!state.fitted) fit();
+    const gesturing = t < state.gestureUntil && cache.valid && !state.drops.size && !state.playing;
+    if (gesturing) {
+      blitCache();
+    } else {
+      if (desiredLod() !== state.lod) rebuild(false);
+      state.dirty = false;
+      if (draw(t)) state.dirty = true; else storeCache();
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+function hitTest(mx, my) {
+  const { scale, x: ox, y: oy } = state.view;
+  const wx = (mx - ox) / scale, wy = (my - oy) / scale;
+  for (let i = state.proj.length - 1; i >= 0; i--) {
+    const p = state.proj[i];
+    if (!p.item.building || wx < p.minX || wx > p.maxX || wy < p.minY || wy > p.maxY) continue;
+    for (const q of p.prims) {
+      if (q.k === "d") { if (Math.hypot(wx - q.pts[0], wy - q.pts[1]) <= q.r * 1.6) return p; continue; }
+      if (q.k !== "o" && p.item.building.style !== "park") continue;
+      let inside = false;
+      for (let a = 0, b = q.pts.length - 2; a < q.pts.length; b = a, a += 2) {
+        const xa = q.pts[a], ya = q.pts[a + 1], xb = q.pts[b], yb = q.pts[b + 1];
+        if ((ya > wy) !== (yb > wy) && wx < ((xb - xa) * (wy - ya)) / (yb - ya) + xa) inside = !inside;
+      }
+      if (inside) return p;
+    }
+  }
+  return null;
+}
+
+function showTip(p, mx, my) {
+  if (state.hover !== p) { state.hover = p; state.dirty = true; }
+  if (!p) { tip.classList.remove("on"); return; }
+  const b = p.item.building, c = b.commit, d = state.city.districts[p.item.district];
+  $("tip-subject").textContent = c.subject ?? "private commit";
+  const extra = [];
+  if (b.repairs.length) extra.push(`${b.repairs.length} repair${b.repairs.length > 1 ? "s" : ""}`);
+  if (b.trees.length > 1) extra.push(`${b.trees.length} trees`);
+  if (b.isLandmark) extra.push("landmark");
+  $("tip-meta").textContent = [c.sha ? c.sha.slice(0, 7) : null, c.author, fmtDate(c.time), `${c.type}`, b.language,
+    `${fmtInt(c.linesChanged)} lines`, `${c.filesTouched} files`, ...extra, state.city.districts.length > 1 ? d.name : null]
+    .filter(Boolean).join(" · ");
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  const tx = Math.min(mx + 16, state.cssW - w - 12), ty = my + 18 + h > state.cssH ? my - h - 12 : my + 18;
+  tip.style.transform = `translate(${tx}px, ${ty}px)`;
+  tip.classList.add("on");
+}
+
+// Pointer: one finger pans, two pinch-zoom, wheel zooms about the cursor.
+const pointers = new Map();
+let pinch = null;
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  canvas.classList.add("dragging");
+  if (pointers.size === 2) {
+    const [a, b] = [...pointers.values()];
+    pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), scale: state.view.scale };
+  }
+});
+canvas.addEventListener("pointermove", (e) => {
+  const prev = pointers.get(e.pointerId);
+  if (!prev) { if (state.proj.length) showTip(hitTest(e.clientX, e.clientY), e.clientX, e.clientY); return; }
+  const cur = { x: e.clientX, y: e.clientY };
+  pointers.set(e.pointerId, cur);
+  if (pointers.size === 2 && pinch) {
+    const [a, b] = [...pointers.values()];
+    zoomAbout((a.x + b.x) / 2, (a.y + b.y) / 2, (pinch.scale * Math.hypot(a.x - b.x, a.y - b.y)) / pinch.d / state.view.scale);
+  } else if (pointers.size === 1) {
+    state.view.x += cur.x - prev.x; state.view.y += cur.y - prev.y; state.dirty = true;
+    state.gestureUntil = performance.now() + 140;
+  }
+  showTip(null);
+});
+const release = (e) => { pointers.delete(e.pointerId); if (pointers.size < 2) pinch = null; if (!pointers.size) canvas.classList.remove("dragging"); };
+canvas.addEventListener("pointerup", release);
+canvas.addEventListener("pointercancel", release);
+canvas.addEventListener("pointerleave", () => showTip(null));
+canvas.addEventListener("wheel", (e) => { e.preventDefault(); zoomAbout(e.clientX, e.clientY, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))); }, { passive: false });
+canvas.addEventListener("dblclick", () => { state.fitted = false; state.dirty = true; });
+function zoomAbout(mx, my, factor) {
+  const next = Math.min(200, Math.max(0.5, state.view.scale * factor)), k = next / state.view.scale;
+  state.view.x = mx - (mx - state.view.x) * k; state.view.y = my - (my - state.view.y) * k; state.view.scale = next;
+  state.dirty = true; state.gestureUntil = performance.now() + 140;
+}
+
+scrub.addEventListener("input", () => { state.playing = false; playButton.textContent = "PLAY"; state.timeIndex = +scrub.value; rebuild(false); });
+playButton.addEventListener("click", () => {
+  const span = state.times.length - 1;
+  if (state.playing) { state.playing = false; playButton.textContent = "PLAY"; return; }
+  if (state.timeIndex >= span) state.timeIndex = 0;
+  const duration = Math.min(30000, 6000 + span * 40);
+  state.playFrom = performance.now() - (state.timeIndex / Math.max(1, span)) * duration;
+  state.playing = true; playButton.textContent = "PAUSE";
+});
+window.addEventListener("resize", () => { resize(); state.fitted = false; });
+
+function accept(city) {
+  if (!city || !Array.isArray(city.districts) || typeof city.schema !== "number") throw new Error("not a city.json");
+  if (city.schema > 1) throw new Error(`city.json schema ${city.schema} needs a newer viewer`);
+  const atLatest = !state.city || state.timeIndex >= state.times.length - 1;
+  const times = new Set();
+  for (const d of city.districts) for (const b of d.buildings) { times.add(b.bornAt); b.repairs.forEach((t) => times.add(t)); b.trees.forEach((t) => times.add(t)); }
+  state.city = city;
+  state.times = [...times].sort((a, b) => a - b);
+  if (atLatest) state.timeIndex = Math.max(0, state.times.length - 1);
+  scrub.max = String(Math.max(0, state.times.length - 1)); scrub.value = String(state.timeIndex);
+  $("bar").hidden = state.times.length < 2;
+  $("name").textContent = city.name; document.title = `${city.name} · Commit City`;
+  $("status").textContent = state.times.length ? "" : "empty lot · the first commit breaks ground";
+  state.memo.clear();
+  rebuild(atLatest);
+}
+
+async function load() {
+  try {
+    const res = await fetch(src, { cache: "no-cache", headers: state.etag ? { "If-None-Match": state.etag } : {} });
+    if (res.status === 304) return;
+    if (!res.ok) throw new Error(`${src}: HTTP ${res.status}`);
+    state.etag = res.headers.get("ETag");
+    accept(await res.json());
+  } catch (err) {
+    console.error(err);
+    if (!state.city) $("status").textContent = `could not load ${src}`;
+  }
+}
+
+resize();
+requestAnimationFrame(frame);
+load();
+// New pushes republish city.json; pick them up live and drop the new buildings in.
+setInterval(() => { if (!document.hidden) load(); }, 60000);
+</script>
+</body>
+</html>
