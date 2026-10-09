@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: swift test
+      - name: Viewer geometry matches Swift geometry
+        run: |
+          set -euo pipefail
+          bin="$(swift build --show-bin-path)/commitcity"
+          "$bin" demo --out /tmp/demo
+          "$bin" scene /tmp/demo/city.json > /tmp/scene.json
+          node Tests/viewer-parity.mjs viewer/index.html /tmp/demo/city.json /tmp/scene.json
+          "$bin" scene /tmp/demo/city.json --at 1720000000 > /tmp/scene-early.json
+          node Tests/viewer-parity.mjs viewer/index.html /tmp/demo/city.json /tmp/scene-early.json 1720000000
+          "$bin" generate --repo . --out /tmp/self
+          "$bin" scene /tmp/self/city.json > /tmp/scene-self.json
+          node Tests/viewer-parity.mjs viewer/index.html /tmp/self/city.json /tmp/scene-self.json
+
+  apple:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift build --target CityKitUI
+      - run: swift test

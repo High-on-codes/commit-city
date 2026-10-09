@@ -1,0 +1,44 @@
+# Copy to .github/workflows/commit-city.yml in any repo, then:
+#   Settings → Pages → Source: GitHub Actions.
+# Your city lives at https://<you>.github.io/<repo>/ (viewer), …/city.svg (README image), …/badge.svg.
+name: Commit City
+
+on:
+  push:
+    branches: [main, master]
+  # Weekly redraw, so neglected repos visibly decay even when nobody pushes.
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: commit-city
+  cancel-in-progress: true
+
+jobs:
+  city:
+    # Swift is preinstalled on GitHub's Ubuntu and macOS runners. Ubuntu is the default because it is
+    # free on public repos and 10x cheaper than macOS on private ones; macos-latest works unchanged.
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the whole history is the city
+      - uses: High-on-codes/commit-city@v1
+        with:
+          out: _site
+          # shape-only: "true"   # private repos: publish geometry only
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4

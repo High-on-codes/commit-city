@@ -1,0 +1,44 @@
+name: Commit City (personal city)
+description: Collects every repo's published city.json and merges them, one district per repo, into one personal city.
+author: Commit City
+branding:
+  icon: grid
+  color: yellow
+
+inputs:
+  out:
+    description: Directory to write the site into.
+    default: _site
+  theme:
+    description: carbon (default), cyanotype or vellum.
+    default: carbon
+  name:
+    description: City name. Defaults to the account name.
+    default: ""
+  config:
+    description: "Optional file listing extra city.json URLs (include: URL) and repos to skip (exclude: repo)."
+    default: .commitcity-profile
+  token:
+    description: Token used to list repositories. The workflow's own GITHUB_TOKEN is enough; no personal token needed.
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build commitcity
+      shell: bash
+      run: |
+        set -euo pipefail
+        swift build -c release --package-path "$GITHUB_ACTION_PATH/.." --product commitcity
+        echo "COMMITCITY_BIN=$(swift build -c release --package-path "$GITHUB_ACTION_PATH/.." --show-bin-path)/commitcity" >> "$GITHUB_ENV"
+
+    - name: Collect and merge
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        OWNER: ${{ github.repository_owner }}
+        CC_OUT: ${{ inputs.out }}
+        CC_THEME: ${{ inputs.theme }}
+        CC_NAME: ${{ inputs.name }}
+        CC_CONFIG: ${{ inputs.config }}
+      run: bash "$GITHUB_ACTION_PATH/collect.sh"

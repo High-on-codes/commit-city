@@ -1,0 +1,54 @@
+name: Commit City
+description: Grow a blueprint city from this repository's history; writes city.json, city.svg, badge.svg and the web viewer.
+author: Commit City
+branding:
+  icon: box
+  color: yellow
+
+inputs:
+  out:
+    description: Directory to write the site into (upload it with actions/upload-pages-artifact).
+    default: _site
+  theme:
+    description: carbon (default), cyanotype or vellum.
+    default: carbon
+  name:
+    description: City name. Defaults to the repository name.
+    default: ""
+  shape-only:
+    description: "true for private repos: publish geometry only, never messages, authors or paths."
+    default: "false"
+
+outputs:
+  city-json:
+    description: Path to the generated city.json.
+    value: ${{ steps.generate.outputs.city-json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build commitcity
+      shell: bash
+      run: |
+        set -euo pipefail
+        swift --version
+        swift build -c release --package-path "$GITHUB_ACTION_PATH" --product commitcity
+        echo "COMMITCITY_BIN=$(swift build -c release --package-path "$GITHUB_ACTION_PATH" --show-bin-path)/commitcity" >> "$GITHUB_ENV"
+
+    - name: Generate city
+      id: generate
+      shell: bash
+      # Inputs travel through env, never interpolated into the script, so a hostile name cannot inject shell.
+      env:
+        CC_OUT: ${{ inputs.out }}
+        CC_THEME: ${{ inputs.theme }}
+        CC_NAME: ${{ inputs.name }}
+        CC_SHAPE: ${{ inputs.shape-only }}
+        CC_REPO_NAME: ${{ github.event.repository.name }}
+      run: |
+        set -euo pipefail
+        args=(generate --repo "$GITHUB_WORKSPACE" --out "$CC_OUT" --theme "$CC_THEME" --name "${CC_NAME:-$CC_REPO_NAME}")
+        if [ "$CC_SHAPE" = "true" ]; then args+=(--shape-only); fi
+        "$COMMITCITY_BIN" "${args[@]}"
+        cp "$GITHUB_ACTION_PATH/viewer/index.html" "$CC_OUT/index.html"
+        echo "city-json=$CC_OUT/city.json" >> "$GITHUB_OUTPUT"

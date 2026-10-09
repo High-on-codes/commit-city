@@ -1,0 +1,12 @@
+#!/bin/sh
+# Commit City post-commit hook: instant, offline city updates.
+#   cp hooks/post-commit .git/hooks/post-commit && chmod +x .git/hooks/post-commit
+# Writes to .git/commit-city/ (outside the working tree, so nothing to commit or ignore).
+# Open .git/commit-city/city.svg, or serve that folder next to viewer/index.html for live replay.
+command -v commitcity >/dev/null 2>&1 || exit 0
+root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+gitdir="$(git rev-parse --absolute-git-dir 2>/dev/null)" || exit 0
+out="${COMMITCITY_OUT:-$gitdir/commit-city}"
+# Detached, so the commit returns immediately; never fails the commit.
+(commitcity generate --repo "$root" --out "$out" --allow-shallow >"$gitdir/commit-city.log" 2>&1 &) 
+exit 0

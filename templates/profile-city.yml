@@ -1,0 +1,37 @@
+# Copy to .github/workflows/commit-city.yml in your profile repo (<you>/<you>), then:
+#   Settings → Pages → Source: GitHub Actions.
+# Put this in that repo's README.md:
+#   [![My city](https://<you>.github.io/<you>/city.svg)](https://<you>.github.io/<you>/)
+name: Personal Commit City
+
+on:
+  schedule:
+    - cron: "41 5 * * *" # daily; each repo's own Action has already published its district
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: commit-city-profile
+  cancel-in-progress: true
+
+jobs:
+  city:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: High-on-codes/commit-city/profile@v1
+        with:
+          out: _site
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deploy
+        uses: actions/deploy-pages@v4
